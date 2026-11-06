@@ -92,7 +92,7 @@ function App(){
     window.addEventListener('storage',changed);return()=>window.removeEventListener('storage',changed);
   },[]);
   const run=useCallback(fn=>{try{const result=fn();setError('');return result;}catch(e){setError(e.message);throw e;}},[]);
-  const commit=useCallback((label,producer)=>run(()=>store.commit(label,producer)),[store,run]);
+  const commit=useCallback((label,producer)=>run(()=>{if(BookingTeams.metadata(store.getState()).sources.length&&!['设置维护身份','登记旧版来源'].includes(label))throw Error('当前为 EIC 汇总数据，请由对应 FIC 修正后重新提交；可在备份页面更新来源或撤销。');return store.commit(label,producer);}),[store,run]);
   const undo=useCallback(()=>{try{run(()=>store.undo());}catch(e){}},[store,run]);
   const redo=useCallback(()=>{try{run(()=>store.redo());}catch(e){}},[store,run]);
   const restoreTo=useCallback(id=>{try{run(()=>store.restoreTo(id));}catch(e){}},[store,run]);
@@ -538,7 +538,7 @@ function UsageGuide({initialSection,onClose}){
   const chapters=BOOKING_GUIDE.filter(c=>!query.trim()||JSON.stringify(c).toLowerCase().includes(query.trim().toLowerCase()));
   const chapter=chapters.find(c=>c.id===section)||chapters[0];
   useEffect(()=>{if(articleRef.current)articleRef.current.scrollTop=0;},[chapter?.id]);
-  return <UtilityDialog title="使用说明" detail="Booking System v3.5 · 按模块查阅，支持关键词搜索" onClose={onClose} className="guide-dialog">
+  return <UtilityDialog title="使用说明" detail="Booking System v3.6 · 按模块查阅，支持关键词搜索" onClose={onClose} className="guide-dialog">
     <div className="guide-layout"><aside><input type="search" aria-label="搜索使用说明" placeholder="搜索：导入、Pending、撤销…" value={query} onChange={e=>setQuery(e.target.value)}/><nav aria-label="使用说明目录">{chapters.map((c,i)=><button key={c.id} className={chapter?.id===c.id?'active':''} onClick={()=>setSection(c.id)}><span>{String(BOOKING_GUIDE.indexOf(c)+1).padStart(2,'0')}</span>{c.title}</button>)}</nav></aside>
     <article ref={articleRef}>{chapter?<><p className="guide-kicker">使用说明 / {chapter.title}</p><h2>{chapter.title}</h2><p className="guide-intro">{chapter.intro}</p>{chapter.sections.map((s,i)=><section key={i} className={s.subsections?'guide-module':undefined}><h3>{s.title}</h3><GuideContent section={s}/></section>)}</>:<div className="anomaly-empty"><h4>没有找到相关说明</h4><p>试试其他关键词，如“工时”“节点”“保存”。</p></div>}</article></div>
   </UtilityDialog>;
@@ -590,16 +590,17 @@ async function fullBackupDigest(payload){
 }
 async function createFullBackup(data){
   validateFullBackupData(data);
-  const payload={format:'booking-system-full-backup',scope:'eic',schemaVersion:2,appVersion:'3.5',exportedAt:new Date().toISOString(),data};
+  const team=BookingTeams.metadata(data);BookingTeams.validate(team);
+  const payload={format:'booking-system-full-backup',scope:'eic',schemaVersion:3,appVersion:'3.6',exportedAt:new Date().toISOString(),team:JSON.parse(JSON.stringify(team)),data};
   return {...payload,checksum:await fullBackupDigest(payload)};
 }
 async function parseFullBackup(text){
   let parsed;try{parsed=JSON.parse(text.replace(/^\uFEFF/,''));}catch(e){throw Error('无法读取 JSON 备份文件，未覆盖任何数据。');}
-  if(!parsed||parsed.format!=='booking-system-full-backup'||![1,2].includes(parsed.schemaVersion)||parsed.scope!=='eic')throw Error('不是支持的全量备份文件，请选择主页导出的 JSON 备份。');
+  if(!parsed||parsed.format!=='booking-system-full-backup'||![1,2,3].includes(parsed.schemaVersion)||parsed.scope!=='eic')throw Error('不是支持的全量备份文件，请选择主页导出的 JSON 备份。');
   const {checksum,...payload}=parsed;
   if(checksum!==await fullBackupDigest(payload))throw Error('备份校验失败，文件可能被修改或损坏，未覆盖任何数据。');
   if(parsed.schemaVersion===1&&!Object.prototype.hasOwnProperty.call(parsed.data,'masterData')){parsed.data.masterData=STAFF_MASTER.map(p=>({...p}));parsed.legacyMaster=true;}
-  validateFullBackupData(parsed.data);return parsed;
+  validateFullBackupData(parsed.data);if(parsed.schemaVersion===3){BookingTeams.validate(parsed.team);if(JSON.stringify(parsed.team)!==JSON.stringify(BookingTeams.metadata(parsed.data)))throw Error('文件身份与内部来源不一致');for(const source of parsed.team.sources)validateFullBackupData(source.data);if(parsed.team.identity.role==='FIC'&&parsed.team.sources.length)throw Error('FIC 文件不能携带多个团队来源');}return parsed;
 }
 function FullBackupControls(){
   const w=React.useContext(WorkspaceContext),input=useRef(null);
@@ -608,19 +609,21 @@ function FullBackupControls(){
   const exportBackup=async()=>{
     setBusy(true);setError('');setMessage('');
     try{
+      if(!BookingTeams.metadata(w.data).identity){autoBackupEvents.dispatchEvent(new Event('setup'));return;}
       const backup=await createFullBackup(w.exportAll());
       const url=URL.createObjectURL(new Blob([JSON.stringify(backup,null,2)],{type:'application/json'}));
-      const a=document.createElement('a');a.href=url;a.download='Booking-System-全部数据-'+dayjs().format('YYYY-MM-DD')+'-'+Date.now()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),30000);
+      const a=document.createElement('a');a.href=url;a.download=BookingTeams.fileName(backup);a.click();setTimeout(()=>URL.revokeObjectURL(url),30000);
       setMessage('已生成全部数据备份，请保管下载的 JSON 文件。');
     }catch(e){setError(e.message);}finally{setBusy(false);}
   };
   const readBackup=async e=>{
     const file=e.target.files?.[0];e.target.value='';if(!file)return;
     setPending(null);setBusy(true);setError('');setMessage('');
-    try{setPending(await parseFullBackup(await file.text()));}catch(err){setError(err.message);}finally{setBusy(false);}
+    try{const parsed=await parseFullBackup(await file.text());if(BookingTeams.metadata(w.data).identity?.role==='EIC'&&parsed.team?.identity.role==='FIC')throw Error('这是 FIC 文件，请使用“导入 FIC 数据”，避免覆盖整个工作台。');setPending(parsed);}catch(err){setError(err.message);}finally{setBusy(false);}
   };
   return <section className="glass-card full-backup-panel">
     <header className="backup-heading"><h2>数据备份与恢复</h2><p>保存完整的数据副本，或从已有备份恢复工作。</p></header>
+    <TeamExchangePanel/>
     <AutoBackupPanel/>
     <div className="backup-manual-grid">
       <section className="backup-action-card"><h3>手动导出</h3><p>下载当前全部数据的 JSON 文件，适合迁移或单独留档。</p><button className="glass-btn" disabled={busy} onClick={exportBackup}>导出全部数据</button></section>
@@ -630,7 +633,7 @@ function FullBackupControls(){
     {busy&&<p role="status">正在处理备份…</p>}{error&&<p role="alert" className="tasklist-footer-error">{error}</p>}{message&&<p role="status">{message}</p>}
     {pending&&<UtilityDialog title="确认恢复全部数据" detail={'备份时间：'+new Date(pending.exportedAt).toLocaleString()+' · 来源版本 '+pending.appVersion} onClose={()=>setPending(null)}>
       {pending.legacyMaster&&<p>此旧版备份未包含人员主数据，恢复时保留当前主数据。</p>}
-      <p>以下八类数据将全部替换；备份中的空列表也会清空当前对应模块。确认后立即保存，当前操作历史中会新增一条可撤销的恢复记录。</p>
+      <p>来源身份：{pending.team?.identity.role||'旧版未标识'} · {pending.team?.identity.name||'需在恢复后设置维护身份'}</p><p>以下八类数据将全部替换；备份中的空列表也会清空当前对应模块。确认后立即保存，当前操作历史中会新增一条可撤销的恢复记录。</p>
       <table className="resolution-table"><thead><tr><th>数据</th><th>当前数量</th><th>备份数量</th></tr></thead><tbody>{summarize(pending.data).map(item=><tr key={item.key}><td>{item.label}</td><td>{summarize(w.data).find(row=>row.key===item.key).count}</td><td>{item.count}</td></tr>)}</tbody></table>
       <p>项目内的节点、备注、编号和完成状态，以及 Task 分工与删除记录均随所属数据恢复。</p>
       <div className="modal-actions"><button className="glass-btn" onClick={()=>setPending(null)}>取消</button><button className="glass-btn primary-btn" onClick={()=>{try{w.restoreAll(pending.legacyMaster?{...pending.data,masterData:w.data.masterData}:pending.data);setPending(null);setError('');setMessage('全部数据已恢复并保存，可通过全局撤销恢复原数据。');}catch(e){setPending(null);setError(e.message);}}}>确认覆盖全部数据</button></div>
@@ -764,7 +767,10 @@ function useAutoBackupState(){
 }
 function AutoBackupManager(){
   const w=React.useContext(WorkspaceContext),latest=useRef(w);latest.current=w;
-  const [prompt,setPrompt]=useState(false),state=useAutoBackupState();
+  const [prompt,setPrompt]=useState(false),[step,setStep]=useState('identity'),state=useAutoBackupState();
+  const [role,setRole]=useState('FIC'),[name,setName]=useState(''),[eic,setEic]=useState(''),[error,setError]=useState(''),[ack,setAck]=useState(false);
+  const openSetup=()=>{const id=BookingTeams.metadata(latest.current.data).identity;setRole(id?.role||'FIC');setName(id?.name||'');setEic(id?.eic||'');setStep(id?'folder':'identity');setError('');setAck(false);setPrompt(true);};
+  const saveIdentity=()=>{try{const current=latest.current,meta=BookingTeams.metadata(current.data),id=meta.identity,n=normalizeName(name),manager=role==='EIC'?n:normalizeName(eic);if(!n||!manager||!BookingStaff.isBookingName(n)||!BookingStaff.isBookingName(manager))throw Error('请填写维护人姓名和所属 EIC，姓名可用点号或空格分隔。');const changed=!id||id.name!==n||id.role!==role||id.eic!==manager;if(meta.sources.length&&changed)throw Error('已有汇总来源，不能在此更改维护身份。');if(changed&&(id||['eicData','budgetData','projects','timesheetData','taskLists'].some(k=>current.data[k].length))&&!ack)throw Error('请确认当前数据确实由该身份维护。');if(changed)current.commit('设置维护身份',d=>{d.matches[BookingTeams.KEY]={...meta,identity:{id:id?.id||crypto.randomUUID(),role,name:n,eic:manager}};});setError('');setStep('folder');}catch(e){setError(e.message);}};
   useEffect(()=>{
     let alive=true;
     const service=BookingAutoBackup.create({getSnapshot:()=>{
@@ -774,29 +780,76 @@ function AutoBackupManager(){
       return latest.current.exportAll();
     },encode:createFullBackup,onChange:()=>autoBackupEvents.dispatchEvent(new Event('change'))});
     autoBackupService=service;
-    service.load().then(s=>{if(!alive)return;if(!s.folder||s.permission!=='granted')setPrompt(true);else service.run();});
-    const tick=()=>service.run();const timer=setInterval(tick,60000);
+    service.load().then(s=>{if(!alive)return;if(!BookingTeams.metadata(latest.current.data).identity||!s.folder||s.permission!=='granted')openSetup();else service.run();});
+    autoBackupEvents.addEventListener('setup',openSetup);
+    const tick=()=>{if(BookingTeams.metadata(latest.current.data).identity)service.run();};const timer=setInterval(tick,60000);
     const visible=()=>{if(document.visibilityState==='visible')tick();};
     document.addEventListener('visibilitychange',visible);window.addEventListener('focus',tick);
-    return()=>{alive=false;clearInterval(timer);document.removeEventListener('visibilitychange',visible);window.removeEventListener('focus',tick);};
+    return()=>{alive=false;clearInterval(timer);autoBackupEvents.removeEventListener('setup',openSetup);document.removeEventListener('visibilitychange',visible);window.removeEventListener('focus',tick);};
   },[]);
   if(!prompt)return null;
-  return <UtilityDialog title="设置自动备份" detail="网页打开期间每两小时备份一次，最多保留五份。" onClose={()=>setPrompt(false)}>
-    <p>{state.folder?'已记住文件夹：'+state.folder+'。请授权后继续自动备份，无需重新选择。':'请选择用于存放自动备份的文件夹。暂不设置时，下次打开程序仍会提醒。'}</p>
-    <p className="utility-note">设置后立即备份一次。关闭网页期间不会备份；电脑休眠或浏览器暂停后，恢复运行时补做一次。</p>
-    {!state.supported&&<p role="alert">当前浏览器不支持直接写入备份文件夹，请使用桌面版 Chrome 或 Edge。仍可在备份页面手动导出。</p>}
-    {state.error&&<p role="alert">{state.error}</p>}
-    <div className="modal-actions"><button className="glass-btn" onClick={()=>setPrompt(false)}>暂不设置</button><button className="glass-btn primary-btn" disabled={!state.ready||!state.supported||state.busy} onClick={async()=>{const ok=state.folder?await autoBackupService.authorize():await autoBackupService.choose();if(ok)setPrompt(false);}}>{state.folder?'授权原文件夹':'选择备份文件夹'}</button></div>
+  return <UtilityDialog title="维护身份与自动备份" detail="先确认维护身份，再选择自动备份文件夹。设置会保留，无需每次重复。" onClose={()=>setPrompt(false)}>
+    <div className="setup-flow">
+      <ol className="setup-steps" aria-label="设置步骤"><li className={step==='identity'?'active':'done'}><span>1</span>维护身份</li><li className={step==='folder'?'active':''}><span>2</span>备份文件夹</li></ol>
+      {step==='identity'?<>
+        <p className="setup-description">此身份会标在导出文件和自动备份中，供经理识别数据来源。</p>
+        <div className="setup-role-options" role="group" aria-label="维护角色">{['FIC','EIC'].map(r=><button key={r} className={'glass-btn '+(role===r?'selected':'')} aria-pressed={role===r} onClick={()=>setRole(r)}><strong>{r}</strong><span>{r==='FIC'?'维护并提交自己的数据':'收集、汇总多个 FIC 的数据'}</span></button>)}</div>
+        <div className="setup-identity-fields"><label>维护人姓名<input aria-label="设置维护人姓名" placeholder="例如 Example.Person" value={name} onChange={e=>setName(e.target.value)}/></label>{role==='FIC'&&<label>所属 EIC<input aria-label="设置所属 EIC" placeholder="填写经理姓名" value={eic} onChange={e=>setEic(e.target.value)}/></label>}</div>
+        <p className="utility-note">姓名可用点号或空格分隔；FIC 身份不会限制共享人员的排班。</p>
+        {(BookingTeams.metadata(w.data).identity||['eicData','budgetData','projects','timesheetData','taskLists'].some(k=>w.data[k].length))&&<label className="setup-ack"><input type="checkbox" checked={ack} onChange={e=>setAck(e.target.checked)}/>更改身份时，我确认当前数据确实由该身份维护。</label>}
+        {error&&<p role="alert" className="tasklist-footer-error">{error}</p>}
+        <div className="modal-actions"><button className="glass-btn" onClick={()=>setPrompt(false)}>暂不设置</button><button className="glass-btn primary-btn" onClick={saveIdentity}>下一步：备份文件夹</button></div>
+      </>:<>
+        <div className="setup-identity-summary"><span>维护身份</span><strong>{BookingTeams.metadata(w.data).identity?.role} · {BookingTeams.metadata(w.data).identity?.name}</strong><button className="glass-btn" onClick={()=>{const id=BookingTeams.metadata(w.data).identity;setRole(id.role);setName(id.name);setEic(id.eic);setAck(false);setStep('identity');}}>返回修改</button></div>
+        <p>{state.folder?'已记住文件夹：'+state.folder+'。可继续使用，不必重新选择。':'选择存放自动备份的文件夹，完成后立即保存第一份备份。'}</p>
+        <p className="utility-note">网页打开期间每两小时备份一次，最多保留五份。关闭网页期间不备份；电脑休眠后恢复运行时补做一次。</p>
+        {!state.supported&&<p role="alert">当前浏览器不支持直接写入文件夹，请使用桌面版 Chrome 或 Edge。已保存的维护身份仍可用于手动导出。</p>}
+        {state.error&&<p role="alert" className="tasklist-footer-error">{state.error}</p>}
+        <div className="modal-actions"><button className="glass-btn" onClick={()=>setPrompt(false)}>暂不设置</button>{state.folder&&<button className="glass-btn" disabled={state.busy||!state.supported} onClick={async()=>{const ok=await autoBackupService.choose();if(ok&&!autoBackupService.getState().error)setPrompt(false);}}>更换文件夹</button>}<button className="glass-btn primary-btn" disabled={!state.ready||!state.supported||state.busy} onClick={async()=>{const ok=!state.folder?await autoBackupService.choose():state.permission!=='granted'?await autoBackupService.authorize():await autoBackupService.run(true);if(ok&&!autoBackupService.getState().error)setPrompt(false);}}>{state.busy?'正在保存…':!state.folder?'选择文件夹并启用':state.permission!=='granted'?'授权文件夹并启用':'完成设置并备份'}</button></div>
+      </>}
+    </div>
   </UtilityDialog>;
 }
 function AutoBackupPanel(){
+  const w=React.useContext(WorkspaceContext),identity=BookingTeams.metadata(w.data).identity;
   const state=useAutoBackupState(),format=value=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'尚未备份';
-  return <section className="backup-auto-card"><div className="backup-auto-heading"><h3>自动备份</h3><span className="backup-status">{!state.ready?'正在读取设置':!state.supported?'浏览器不支持':state.busy?'正在备份':state.error?'备份需要处理':!state.folder?'尚未设置':state.permission!=='granted'?'需要授权':'已启用'}</span></div>
+  return <section className="backup-auto-card"><div className="backup-auto-heading"><h3>自动备份</h3><span className="backup-status">{!identity?'请先设置维护身份':!state.ready?'正在读取设置':!state.supported?'浏览器不支持':state.busy?'正在备份':state.error?'备份需要处理':!state.folder?'尚未设置':state.permission!=='granted'?'需要授权':'已启用'}</span></div>
     <p>每 2 小时自动保存一次 · 最多保留 5 份，成功写入后移除最早的一份。</p>
     <dl className="backup-facts"><div><dt>存放文件夹</dt><dd>{state.folder||'尚未选择'}</dd></div><div><dt>最近成功备份</dt><dd>{format(state.lastSuccess)}</dd></div><div><dt>下次备份</dt><dd>{state.folder&&state.permission==='granted'&&state.lastSuccess?format(state.lastSuccess+BookingAutoBackup.INTERVAL):'启用后自动安排'}</dd></div></dl>
-    <div className="full-backup-actions"><button className="glass-btn" disabled={!state.ready||!state.supported||state.busy} onClick={()=>autoBackupService.choose()}>{state.folder?'更改备份文件夹':'选择备份文件夹'}</button>{state.folder&&state.permission!=='granted'&&<button className="glass-btn primary-btn" disabled={state.busy} onClick={()=>autoBackupService.authorize()}>授权原文件夹</button>}<button className="glass-btn" disabled={!state.folder||state.permission!=='granted'||state.busy||!state.supported} onClick={()=>autoBackupService.run(true)}>立即备份一次</button></div>
+    <div className="full-backup-actions"><button className="glass-btn" disabled={!!identity&&(!state.ready||!state.supported||state.busy)} onClick={()=>{if(!identity)autoBackupEvents.dispatchEvent(new Event('setup'));else autoBackupService.choose();}}>{!identity?'设置身份与备份':state.folder?'更改备份文件夹':'选择备份文件夹'}</button>{identity&&state.folder&&state.permission!=='granted'&&<button className="glass-btn primary-btn" disabled={state.busy} onClick={()=>autoBackupService.authorize()}>授权原文件夹</button>}<button className="glass-btn" disabled={!identity||!state.folder||state.permission!=='granted'||state.busy||!state.supported} onClick={()=>autoBackupService.run(true)}>立即备份一次</button></div>
     {state.error&&<p className="tasklist-footer-error" role="alert">{state.error}</p>}
     <p className="backup-footnote">仅在网页运行且文件夹获授权时备份。文件夹设置与版本号无关；沿用同一浏览器、用户及打开位置即可复用。更换浏览器、清除站点数据或改变打开位置可能需要重新选择。浏览器仅允许显示文件夹名称，不提供完整路径。</p>
     {!state.supported&&state.ready&&<p role="alert">自动备份需要支持文件夹读写的桌面版 Chrome 或 Edge，当前可使用手动导出。</p>}
   </section>;
+}
+
+function TeamExchangePanel(){
+ const w=React.useContext(WorkspaceContext),meta=BookingTeams.metadata(w.data),id=meta.identity;
+ const [role,setRole]=useState(id?.role||'FIC'),[name,setName]=useState(id?.name||''),[eic,setEic]=useState(id?.eic||''),[error,setError]=useState(''),[queue,setQueue]=useState([]),[preview,setPreview]=useState(null),[target,setTarget]=useState(''),[old,setOld]=useState(false),[ack,setAck]=useState(false),[notice,setNotice]=useState(''),[legacyName,setLegacyName]=useState('');const input=useRef(null);
+ const identityKey=JSON.stringify(id||null),previousIdentity=useRef(identityKey);useEffect(()=>{if(previousIdentity.current!==identityKey){previousIdentity.current=identityKey;setRole(id?.role||'FIC');setName(id?.name||'');setEic(id?.eic||'');}},[identityKey]);
+ const attempt=fn=>{try{fn();setError('');}catch(e){setError(e.message);}};
+ const saveIdentity=()=>attempt(()=>{const n=normalizeName(name),manager=role==='EIC'?n:normalizeName(eic);if(!n||!manager||!BookingStaff.isBookingName(n)||!BookingStaff.isBookingName(manager))throw Error('请填写有效的维护人姓名和所属 EIC');if(meta.sources.length&&(role!==id.role||n!==id.name))throw Error('已有汇总来源，不能变更维护身份。请使用独立工作台维护其他身份。');if((id||['eicData','budgetData','projects','timesheetData','taskLists'].some(k=>w.data[k].length))&&!window.confirm('确认维护身份？当前工作台数据将由该身份维护并导出；请勿将他人的整份数据冒作本人的提交。'))return;w.commit('设置维护身份',d=>{d.matches[BookingTeams.KEY]={...meta,identity:{id:id?.id||crypto.randomUUID(),role,name:n,eic:manager}};});setNotice('维护身份已保存；自动备份和导出将使用此身份。');});
+ const read=async e=>{const files=[...e.target.files];e.target.value='';try{const values=[];for(const f of files)values.push(await parseFullBackup(await f.text()));if(values.some(b=>b.team?.identity.role==='EIC'))throw Error('EIC 文件应通过“恢复全部数据”整份恢复');setQueue(values);setPreview(null);setTarget('');setOld(false);setAck(false);setError('');}catch(err){setError(err.message);}};
+ const build=()=>attempt(()=>{const p=BookingTeams.plan(w.data,queue[0],target,old,ack);const oldMaster=new Map(w.data.masterData.map(p=>[p.email.toLowerCase(),p]));for(const person of p.entry.data.masterData){const prior=oldMaster.get(person.email.toLowerCase());if(prior&&JSON.stringify([prior.name,prior.level,prior.fic,prior.eic])!==JSON.stringify([person.name,person.level,person.fic,person.eic])&&!p.conflicts.people.some(([email])=>email===person.email.toLowerCase()))p.conflicts.people.push([person.email.toLowerCase(),[{source:'current',person:prior},{source:p.entry.id,person}]]);}p.meta.owners={...p.meta.owners};p.meta.people={...p.meta.people};for(const [code]of p.conflicts.projects)delete p.meta.owners[code];for(const [email]of p.conflicts.people)delete p.meta.people[email];if(!p.meta.rateSource)p.meta.rateSource=p.entry.id;setPreview(p);});
+ const update=(kind,key,value)=>setPreview(p=>({...p,meta:{...p.meta,[kind]:{...p.meta[kind],[key]:value}}}));
+ const apply=()=>attempt(()=>{for(const [email,rows]of preview.conflicts.people)if(!preview.meta.people[email])throw Error('请确认人员主数据差异：'+email);const next=BookingTeams.materialize(w.data,preview.meta);w.restoreAll(next);setNotice('已更新 '+preview.entry.name+'；其他来源保留。可通过全局撤销恢复。');setQueue(q=>q.slice(1));setPreview(null);setTarget('');setOld(false);setAck(false);});
+ return <section className="backup-auto-card team-exchange"><h3>维护身份与 FIC 数据汇总</h3><p>数据按提交来源更新；排班按实际人员汇总，借用人员不改变来源。{meta.sources.length>0&&'当前汇总数据只读，请在源 FIC 工作台修正后重新提交。'}</p>
+ <div className="team-form"><label>身份<select value={role} onChange={e=>setRole(e.target.value)}><option>FIC</option><option>EIC</option></select></label><label>维护人姓名<input aria-label="维护人姓名" value={name} onChange={e=>setName(e.target.value)}/></label>{role==='FIC'&&<label>所属 EIC<input aria-label="所属 EIC" value={eic} onChange={e=>setEic(e.target.value)}/></label>}<button className="glass-btn" onClick={saveIdentity}>保存维护身份</button></div>
+ <div className="team-identity-meta">{id&&<span title={'来源编号：'+id.id}>当前身份 <strong>{id.role} · {id.name}</strong><span className="team-identity-manager">所属 EIC：{id.eic}</span></span>}{notice&&<span role="status" className="team-save-status">{notice}</span>}</div>
+ {id?.role==='EIC'&&<section className="team-source-section" aria-label="FIC 来源列表">
+ <header className="team-source-heading"><div><h4>FIC 数据来源 <span>{meta.sources.length}</span></h4><p>每份文件只更新对应 FIC；其他来源的数据保留。</p></div><button className="glass-btn primary-btn" onClick={()=>input.current.click()}>导入 FIC 数据</button><input ref={input} type="file" multiple accept=".json" hidden aria-label="选择 FIC 数据" onChange={read}/></header>
+ <div className="team-source-table-wrap"><table className="team-source-table"><thead><tr><th scope="col">FIC 来源</th><th scope="col">最近导出</th><th scope="col">最近导入</th><th scope="col">状态</th></tr></thead><tbody>{meta.sources.length?meta.sources.map(s=><tr key={s.id}><td><strong title={'来源编号：'+s.id}>{s.name}</strong><span className="team-source-id" title={s.id}>来源编号 {s.id.length>14?s.id.slice(0,8)+'…':s.id}</span></td><td>{s.exportedAt?<time>{new Date(s.exportedAt).toLocaleString('zh-CN',{hour12:false})}</time>:<span className="team-source-muted">尚未收到文件</span>}</td><td>{s.importedAt?<time>{new Date(s.importedAt).toLocaleString('zh-CN',{hour12:false})}</time>:<span className="team-source-muted">—</span>}</td><td><span className={'team-source-status '+(s.importedAt?'received':'waiting')}>{s.importedAt?'已导入':s.exportedAt?'本地保留':'待接收'}</span></td></tr>):<tr><td colSpan={4}><div className="team-source-empty"><UIIcon name="people"/><strong>尚未导入 FIC 数据</strong><p>收到文件后，点击右上方“导入 FIC 数据”。<br/>可一次选择多份文件，逐份核对来源后确认。</p></div></td></tr>}</tbody></table></div>
+ <p className="team-source-help">每次确认都可全局撤销；EIC 完整备份会保留全部来源及其更新记录。</p>
+ <details className="team-legacy"><summary><span>接收旧版备份</span><small>适用于 3.5 等未带身份标识的 JSON</small></summary><div className="team-legacy-body"><p>先登记旧备份所属的 FIC，再通过上方“导入 FIC 数据”选择文件并指定此来源。3.6 文件已带身份标识，可直接导入，无需登记。</p><p className="team-legacy-note">登记只建立接收来源，不会导入数据，也不会新增 Master Data 人员。</p><div className="team-legacy-form"><label>备份所属 FIC<input aria-label="旧版 FIC 姓名" placeholder="例如 Example.Person" value={legacyName} onChange={e=>setLegacyName(e.target.value)}/></label><button className="glass-btn" disabled={!legacyName.trim()} onClick={()=>attempt(()=>{const fic=normalizeName(legacyName);if(!BookingStaff.isBookingName(fic))throw Error('姓名无效');if(meta.sources.some(s=>s.name===fic))throw Error('该来源已经存在');w.commit('登记旧版来源',d=>{const m=JSON.parse(JSON.stringify(meta));const empty=BookingTeams.clean(d);for(const k of ['masterData','eicData','budgetData','projects','timesheetData','taskLists'])empty[k]=[];empty.matches={};m.sources.push({id:crypto.randomUUID(),name:fic,eic:id.name,data:empty});d.matches[BookingTeams.KEY]=m;});setLegacyName('');setNotice('已登记 '+fic+'，导入旧版文件时请选择此来源。');})}>登记接收来源</button></div></div></details>
+ </section>}
+ {error&&<p role="alert" className="tasklist-footer-error">{error}</p>}
+ {!!queue.length&&<UtilityDialog title="确认 FIC 数据来源" detail={'待处理 '+queue.length+' 份 · '+(queue[0].team?.identity.name||'旧版未标识')+' · '+new Date(queue[0].exportedAt).toLocaleString('zh-CN')} onClose={()=>{setQueue([]);setPreview(null);}}>
+ {!preview?<><label>覆盖来源<select aria-label="覆盖来源" value={target} onChange={e=>setTarget(e.target.value)}><option value="">按文件编号自动识别</option>{meta.sources.map(s=><option key={s.id} value={s.id}>{s.name} · {s.id}</option>)}</select></label><label><input type="checkbox" checked={ack} onChange={e=>setAck(e.target.checked)}/>确认负责人或来源编号调整，文件确实属于所选来源</label><label><input type="checkbox" checked={old} onChange={e=>setOld(e.target.checked)}/>允许导入旧版或重复文件（替换，不追加）</label><button className="glass-btn" onClick={build}>预览更新范围</button></>:<>
+ <p>将{preview.previous?'替换':'新增'} {preview.entry.name} 的完整快照。文件中删除的记录同步移除，其他 FIC 来源不受影响。</p><table className="resolution-table"><thead><tr><th>数据</th><th>原来源数量</th><th>新数量</th></tr></thead><tbody>{Object.entries(EIC_BACKUP_NAMES).map(([k,label])=><tr key={k}><td>{label}</td><td>{Array.isArray(preview.previous?.data[k])?preview.previous.data[k].length:'—'}</td><td>{Array.isArray(preview.entry.data[k])?preview.entry.data[k].length:'—'}</td></tr>)}</tbody></table>
+ <details><summary>查看本次完整记录（人员、项目、日期及工时）</summary><pre style={{maxHeight:180,overflow:'auto',whiteSpace:'pre-wrap'}}>{JSON.stringify(preview.entry.data,null,2)}</pre></details>
+ {preview.conflicts.projects.map(([code,ids])=><label key={code}>共享项目 {code}：选择预算、实际工时、节点、Task 资料来源（排班仍全部汇总）<select aria-label={'项目来源 '+code} value={preview.meta.owners[code]||''} onChange={e=>update('owners',code,e.target.value)}><option value="">请选择</option>{ids.map(i=><option key={i} value={i}>{preview.meta.sources.find(s=>s.id===i).name}</option>)}</select></label>)}
+ {preview.conflicts.people.map(([email,rows])=><label key={email}>人员差异 {email}<select aria-label={'人员来源 '+email} value={preview.meta.people[email]||''} onChange={e=>update('people',email,e.target.value)}><option value="">请选择</option>{rows.map(r=><option key={r.source} value={r.source}>{r.source==='current'?'经理现有名单':preview.meta.sources.find(s=>s.id===r.source)?.name}：{r.person.name} / {r.person.level} / FIC {r.person.fic} / EIC {r.person.eic}</option>)}</select></label>)}
+ <label>汇总费率来源<select value={preview.meta.rateSource} onChange={e=>setPreview(p=>({...p,meta:{...p.meta,rateSource:e.target.value}}))}>{preview.meta.sources.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label><button className="glass-btn primary-btn" onClick={apply}>确认更新 {preview.entry.name} 的数据</button></>}{error&&<p role="alert">{error}</p>}
+ </UtilityDialog>}
+ </section>;
 }

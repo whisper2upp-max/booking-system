@@ -2,7 +2,7 @@
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
-target = root / 'app/booking system v3.5.html'
+target = root / 'app/booking system v3.6.html'
 text = target.read_text(encoding='utf-8')
 start = '// BEGIN V3 WORKSPACE'
 end = '// END V3 WORKSPACE'

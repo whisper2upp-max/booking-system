@@ -1,6 +1,6 @@
 const fs=require('fs'),path=require('path');
 const chapters=require('../app/usage-guide.js');
-const lines=['# Booking System v3.5 使用说明','','程序内可通过顶部“使用说明”打开同一份内容，并按模块浏览或搜索。',''];
+const lines=['# Booking System v3.6 使用说明','','程序内可通过顶部“使用说明”打开同一份内容，并按模块浏览或搜索。',''];
 const tableCell=value=>String(value).replace(/\|/g,'\\|').replace(/\r?\n/g,'<br>');
 function renderSection(section,level=3){
   lines.push('#'.repeat(level)+' '+section.title,'');
@@ -19,5 +19,5 @@ chapters.forEach((chapter,index)=>{
   lines.push(`## ${index+1}. ${chapter.title}`,'',chapter.intro,'');
   chapter.sections.forEach(section=>renderSection(section));
 });
-fs.writeFileSync(path.join(__dirname,'../使用说明_v3.5.md'),lines.join('\n'));
-console.log(`Generated ${chapters.length}-chapter v3.5 Markdown guide from the in-app content.`);
+fs.writeFileSync(path.join(__dirname,'../使用说明_v3.6.md'),lines.join('\n'));
+console.log(`Generated ${chapters.length}-chapter v3.6 Markdown guide from the in-app content.`);
