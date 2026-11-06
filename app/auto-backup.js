@@ -33,13 +33,13 @@
         if(!force&&config.lastSuccess&&now()-config.lastSuccess<INTERVAL)return false;
         const backup=await encode(getSnapshot()),stamp=Math.max(now(),(config.lastSuccess||0)+1);
         const prefix='Booking-System-Auto-'+config.owner+'-';
-        const name=prefix+String(stamp)+'.json';
+        const name=prefix+String(stamp)+'-'+(root.BookingTeams?root.BookingTeams.fileName(backup,true):'backup.json');
         const file=await config.handle.getFileHandle(name,{create:true});
         let stream;try{stream=await file.createWritable();await stream.write(JSON.stringify(backup,null,2));await stream.close();}catch(e){try{await stream?.abort();await config.handle.removeEntry(name);}catch(_){}throw e;}
         // Only this installation’s automatic-backup namespace is eligible for pruning.
         const candidates=[];
         for await(const [filename,entry]of config.handle.entries()){
-          if(entry.kind!=='file'||!filename.startsWith(prefix)||!/^\d{13}\.json$/.test(filename.slice(prefix.length)))continue;
+          if(entry.kind!=='file'||!filename.startsWith(prefix)||!/^\d{13}(?:\.json|-Booking-.+\.json|-backup\.json)$/.test(filename.slice(prefix.length)))continue;
           candidates.push(filename);
         }
         candidates.sort();
