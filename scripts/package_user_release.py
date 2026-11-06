@@ -68,6 +68,11 @@ with tempfile.TemporaryDirectory(prefix='booking-user-package-') as temp:
     (stage / 'app').mkdir(parents=True)
     for name in runtime_files:
         shutil.copy2(source / 'app' / name, stage / 'app' / name)
+    documentation = ['README.md', '使用说明_v3.6.md', '更新日志_v3.6.md']
+    documentation += [p.relative_to(source).as_posix() for p in sorted((source/'docs/images').glob('*.png'))]
+    for name in documentation:
+        (stage / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source / name, stage / name)
     (stage / '开始使用.txt').write_text(quick_start, encoding='utf-8-sig')
     shutil.copy2(source / 'booking template.xlsx', stage / 'booking template.xlsx')
 
@@ -106,7 +111,7 @@ for(const name of ['booking template.xlsx','SG+Booking格式.xlsx']){
 
     expected = {'app/'+name for name in runtime_files} | {
         '开始使用.txt', 'booking template.xlsx', 'SG+Booking格式.xlsx'
-    }
+    } | set(documentation)
     files = sorted(p for p in stage.rglob('*') if p.is_file())
     assert {p.relative_to(stage).as_posix() for p in files} == expected
     temporary_archive = Path(temp) / archive_path.name
@@ -114,7 +119,7 @@ for(const name of ['booking template.xlsx','SG+Booking格式.xlsx']){
         for file in files:
             archive.write(file, 'v3.6/'+file.relative_to(stage).as_posix())
     with zipfile.ZipFile(temporary_archive) as archive:
-        assert len(archive.infolist()) == 14
+        assert len(archive.infolist()) == len(expected)
         for file in files:
             assert archive.read('v3.6/'+file.relative_to(stage).as_posix()) == file.read_bytes()
 
@@ -127,5 +132,5 @@ for(const name of ['booking template.xlsx','SG+Booking格式.xlsx']){
 
 sha = hashlib.sha256(archive_path.read_bytes()).hexdigest()
 archive_path.with_suffix('.zip.sha256').write_text(sha+'  '+archive_path.name+'\n')
-print(json.dumps({'archive':str(archive_path),'distribution':str(distribution),'files':len(runtime_files)+3,
+print(json.dumps({'archive':str(archive_path),'distribution':str(distribution),'files':len(expected),
                   'bytes':archive_path.stat().st_size,'sha256':sha,'runtime':'matches source byte-for-byte'},ensure_ascii=False))
