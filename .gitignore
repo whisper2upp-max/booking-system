@@ -1,0 +1,17 @@
+# User-owned internal data must never be committed.
+.DS_Store
+__pycache__/
+*.pyc
+node_modules/
+masterdata*
+MasterData*.xlsx
+*.json
+*.csv
+*.xlsx
+!booking template.xlsx
+!SG+Booking格式.xlsx
+*.zip
+*.sha256
+tests/ui-artifacts/
+工作交接/
+待整理数据/
